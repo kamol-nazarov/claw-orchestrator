@@ -43,13 +43,15 @@ function makeStubManager(
       }
       return { name: 'x', state: 'ready' };
     }),
-    sendMessage: vi.fn(async () => {
+    sendMessage: vi.fn(async (_name: string, _message: string, sendOptions?: { onChunk?: (chunk: string) => void; onEvent?: (event: { type: string; tool?: unknown }) => void }) => {
       if (throwsRemaining > 0) {
         throwsRemaining -= 1;
         throw new Error('subprocess died');
       }
       const output = opts.sendOutputs?.[sendIndex] ?? opts.sendOutput ?? '';
       sendIndex += 1;
+      sendOptions?.onChunk?.('live output');
+      sendOptions?.onEvent?.({ type: 'tool_use', tool: { name: 'Read' } });
       return { output, error: undefined };
     }),
     stopSession: vi.fn(async () => undefined),
@@ -108,6 +110,19 @@ function findStart(calls: StubCalls, role: 'planner' | 'coder' | 'reviewer'): Re
 }
 
 describe('ClaudeAgentDispatcher — role engine configuration', () => {
+  it('emits live CLI chunks and tool events with the owning role', async () => {
+    const { dispatcher } = makeDispatcher();
+    const chunks: unknown[] = [];
+    const events: unknown[] = [];
+    dispatcher.on('role_stream', (entry) => chunks.push(entry));
+    dispatcher.on('role_event', (entry) => events.push(entry));
+
+    await dispatcher.deliver(Msg.chat(0, { text: 'hello' }));
+
+    expect(chunks).toContainEqual({ role: 'planner', chunk: 'live output' });
+    expect(events).toContainEqual({ role: 'planner', event: { type: 'tool_use', tool: { name: 'Read' } } });
+  });
+
   it('keeps the legacy Claude model defaults when no role overrides are provided', async () => {
     const { dispatcher, calls } = makeDispatcher();
 

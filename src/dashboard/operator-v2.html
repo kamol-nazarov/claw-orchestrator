@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Claw Operator Console</title>
+    <link rel="stylesheet" href="/dashboard/assets/organic.css" />
+    <link rel="stylesheet" href="/dashboard/assets/operator-v2.css" />
+    <script defer src="/dashboard/assets/operator-v2.js"></script>
+  </head>
+  <body>
+    <div class="om-app" id="app" data-connection="connecting">
+      <aside class="om-rail" aria-label="Operator console navigation">
+        <div class="om-brand" aria-label="Claw">C</div>
+        <nav class="om-nav">
+          <button class="om-nav-target" data-screen="autoloop" aria-label="Autoloops" title="Autoloops">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-3-6.7"></path><path d="M21 3v5h-5"></path></svg>
+          </button>
+          <button class="om-nav-target" data-screen="sessions" aria-label="Sessions" title="Sessions">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 8 4 4-4 4"></path><path d="M13 16h6"></path></svg>
+          </button>
+          <button class="om-nav-target" data-screen="council" aria-label="Councils" title="Councils">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"></circle><path d="M3 20a6 6 0 0 1 12 0"></path><path d="M17 6a3 3 0 0 1 0 6"></path></svg>
+          </button>
+          <button class="om-nav-target" data-screen="forge" aria-label="Forge" title="Forge">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 15c3-4 5 2 8-1s4 1 8-2"></path></svg>
+          </button>
+          <button class="om-nav-target" data-screen="models" aria-label="Models" title="Models">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 20 7.5v9L12 21l-8-4.5v-9z"></path><path d="M12 12l8-4.5"></path><path d="M12 12v9"></path><path d="M12 12 4 7.5"></path></svg>
+          </button>
+        </nav>
+        <div class="om-connection">
+          <span id="connectionLabel">Connecting</span>
+          <i id="connectionDot" aria-hidden="true"></i>
+        </div>
+      </aside>
+      <main class="om-main" id="screen" tabindex="-1">
+        <section class="om-loading-shell" aria-label="Loading operator console">
+          <div class="om-skeleton om-skeleton-hero"></div>
+          <div class="om-skeleton-grid"><div class="om-skeleton"></div><div class="om-skeleton"></div><div class="om-skeleton"></div></div>
+        </section>
+      </main>
+      <div class="om-toast" id="toast" role="status" aria-live="polite" hidden></div>
+      <div class="om-dialog-backdrop" id="dialogRoot" hidden></div>
+    </div>
+  </body>
+</html>

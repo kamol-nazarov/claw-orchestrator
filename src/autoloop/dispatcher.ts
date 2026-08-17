@@ -496,6 +496,10 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     try {
       return (await this.config.manager.sendMessage(name, promptText, {
         timeout: this.config.sendTimeoutMs ?? 10 * 60_000,
+        onChunk: (chunk) => this.emit('role_stream', { role: agent, chunk }),
+        onEvent: (event) => {
+          if (event.type !== 'text') this.emit('role_event', { role: agent, event });
+        },
       })) as SendMessageResult;
     } catch (err) {
       this.logger.warn?.(`[autoloop] ${agent} send threw, attempting reset+retry: ${(err as Error).message}`);
@@ -508,6 +512,10 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       try {
         return (await this.config.manager.sendMessage(name, promptText, {
           timeout: this.config.sendTimeoutMs ?? 10 * 60_000,
+          onChunk: (chunk) => this.emit('role_stream', { role: agent, chunk }),
+          onEvent: (event) => {
+            if (event.type !== 'text') this.emit('role_event', { role: agent, event });
+          },
         })) as SendMessageResult;
       } catch (err2) {
         this.logger.error?.(`[autoloop] ${agent} second attempt failed after reset: ${(err2 as Error).message}`);
@@ -676,6 +684,10 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       this.withRoleInstructions('planner', this.plannerSelection, this.plannerSystemPrompt, promptText),
       {
         timeout: this.config.sendTimeoutMs ?? 10 * 60_000,
+        onChunk: (chunk) => this.emit('role_stream', { role: 'planner', chunk }),
+        onEvent: (event) => {
+          if (event.type !== 'text') this.emit('role_event', { role: 'planner', event });
+        },
       },
     )) as SendMessageResult;
 

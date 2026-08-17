@@ -133,6 +133,36 @@ describe('POST /council/new', () => {
     expect(manager.councilStart).toHaveBeenCalledOnce();
   });
 
+  it('accepts registry-backed multi-engine council members', async () => {
+    vi.mocked(manager.councilStart).mockClear();
+    const r = await fetch(`http://127.0.0.1:${port}/council/new`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        task: 'compare implementations',
+        projectDir: '/tmp',
+        maxRounds: 3,
+        agents: [
+          { model: 'claude-opus-5', role: 'chair' },
+          { model: 'gemini-3.7-flash-medium', role: 'member' },
+          { model: 'gpt-5.6-sol', role: 'auditor' },
+        ],
+      }),
+    });
+    expect(r.status).toBe(200);
+    expect(manager.councilStart).toHaveBeenCalledWith(
+      'compare implementations',
+      expect.objectContaining({
+        maxRounds: 3,
+        agents: [
+          expect.objectContaining({ engine: 'claude', model: 'claude-opus-5', role: 'chair' }),
+          expect.objectContaining({ engine: 'agy', model: 'gemini-3.7-flash-medium', role: 'member' }),
+          expect.objectContaining({ engine: 'codex', model: 'gpt-5.6-sol', role: 'auditor' }),
+        ],
+      }),
+    );
+  });
+
   it('returns 400 when task is missing', async () => {
     const r = await fetch(`http://127.0.0.1:${port}/council/new`, {
       method: 'POST',

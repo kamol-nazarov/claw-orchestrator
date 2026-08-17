@@ -440,7 +440,11 @@ export interface SessionInfo {
   claudeSessionId?: string;
   created: string;
   cwd: string;
+  engine?: EngineType;
   model?: string;
+  effort?: EffortLevel;
+  activity: 'working' | 'idle';
+  lastActivity: string;
   paused: boolean;
   stats: SessionStats;
 }

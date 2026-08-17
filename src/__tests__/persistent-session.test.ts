@@ -142,6 +142,26 @@ describe('PersistentClaudeSession', () => {
       expect(args).toContain('claude-sonnet-4-6');
     });
 
+    it('prepends configured Windows launcher arguments', async () => {
+      const previous = process.env.CLAUDE_BIN_ARGS;
+      process.env.CLAUDE_BIN_ARGS = JSON.stringify(['C:\\tools\\claude\\cli.js']);
+      try {
+        session = new PersistentClaudeSession(makeConfig(), 'node.exe');
+        const { spawn } = await import('node:child_process');
+        const startPromise = session.start();
+        emitInitEvent(mockProc);
+        await startPromise;
+
+        const spawnCall = vi.mocked(spawn).mock.calls.at(-1)!;
+        expect(spawnCall[0]).toBe('node.exe');
+        expect(spawnCall[1]?.[0]).toBe('C:\\tools\\claude\\cli.js');
+        expect(spawnCall[1]).toContain('-p');
+      } finally {
+        if (previous === undefined) delete process.env.CLAUDE_BIN_ARGS;
+        else process.env.CLAUDE_BIN_ARGS = previous;
+      }
+    });
+
     it('includes --resume flag when resumeSessionId is set', async () => {
       session = new PersistentClaudeSession(makeConfig({ resumeSessionId: 'resume_abc' }));
       const { spawn } = await import('node:child_process');

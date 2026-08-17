@@ -10,6 +10,7 @@ import {
   resolveEngineAndModel,
   resolveProvider,
   getModelList,
+  getModelDefinitions,
   getContextWindow,
   getModelPricing,
   overrideModelPricing,
@@ -63,6 +64,9 @@ describe('lookupModel', () => {
       'codex-mini-latest',
       'gemini-3.1-pro-preview',
       'gemini-3-flash-preview',
+      'gemini-3.7-flash-medium',
+      'gemini-3.7-flash-high',
+      'gemini-3.7-flash-low',
       'gemini-3.5-flash',
       'gemini-3.1-pro',
       'gemini-2.5-pro',
@@ -106,6 +110,10 @@ describe('resolveEngineAndModel', () => {
       engine: 'agy',
       model: 'gemini-3.5-flash',
     });
+    expect(resolveEngineAndModel('gemini-3.7-flash-medium')).toEqual({
+      engine: 'agy',
+      model: 'gemini-3.7-flash-medium',
+    });
     expect(resolveEngineAndModel('composer-2')).toEqual({ engine: 'cursor', model: 'composer-2' });
   });
 
@@ -113,6 +121,7 @@ describe('resolveEngineAndModel', () => {
     expect(resolveEngineAndModel('opus')).toEqual({ engine: 'claude', model: 'claude-opus-5' });
     expect(resolveEngineAndModel('gemini-flash')).toEqual({ engine: 'gemini', model: 'gemini-3-flash-preview' });
     expect(resolveEngineAndModel('agy-pro')).toEqual({ engine: 'agy', model: 'gemini-3.1-pro' });
+    expect(resolveEngineAndModel('agy-flash-3.7')).toEqual({ engine: 'agy', model: 'gemini-3.7-flash-medium' });
   });
 
   it('uses the agy/ prefix to force the Antigravity engine', () => {
@@ -184,6 +193,21 @@ describe('getModelList', () => {
     expect(opus?.owned_by).toBe('anthropic');
     const gpt = list.data.find((m) => m.id === 'gpt-5.4');
     expect(gpt?.owned_by).toBe('openai');
+  });
+});
+
+describe('getModelDefinitions', () => {
+  it('returns non-secret full registry metadata and explicit local-patch provenance', () => {
+    const models = getModelDefinitions();
+    const flash = models.find((model) => model.id === 'gemini-3.7-flash-medium');
+    expect(flash).toMatchObject({
+      engine: 'agy',
+      provider: 'google',
+      contextWindow: 1_000_000,
+      patched: true,
+    });
+    expect(flash?.aliases).toContain('agy-flash-3.7');
+    expect(models.find((model) => model.id === 'gemini-3.5-flash')?.patched).not.toBe(true);
   });
 });
 

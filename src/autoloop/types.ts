@@ -9,6 +9,23 @@ export type AutoloopStatus = 'planning' | 'running' | 'paused' | 'terminated' | 
 /** The three autoloop roles. Single source of truth — dispatcher and SessionManager both use it. */
 export type AutoloopRoleName = 'planner' | 'coder' | 'reviewer';
 
+export type AutoloopRoleActivityStatus = 'working' | 'idle' | 'waiting' | 'paused' | 'done' | 'error';
+
+export interface AutoloopRoleActivity {
+  status: AutoloopRoleActivityStatus;
+  last_activity_at: number;
+  detail?: string;
+  /** Session-scoped telemetry. This is not provider account quota. */
+  usage?: {
+    turns: number;
+    tokensIn: number;
+    tokensOut: number;
+    cachedTokens: number;
+    costUsd: number;
+    contextPercent: number;
+  };
+}
+
 export interface AutoloopState {
   run_id: string;
   status: AutoloopStatus;
@@ -33,6 +50,15 @@ export interface AutoloopState {
   metric_history: number[];
   /** ms since epoch of the last handled message; used by stall detector. */
   last_activity_at: number;
+  /** Effective role selections surfaced to operator UIs. */
+  planner_engine?: string;
+  planner_model?: string;
+  coder_engine?: string;
+  coder_model?: string;
+  reviewer_engine?: string;
+  reviewer_model?: string;
+  /** Live role liveness derived from the backing sessions. */
+  role_activity?: Record<AutoloopRoleName, AutoloopRoleActivity>;
 }
 
 /** How many metric points the runner remembers for prior_metrics injection. */

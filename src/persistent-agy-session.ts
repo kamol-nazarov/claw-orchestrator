@@ -132,6 +132,14 @@ export class PersistentAgySession extends BaseOneShotSession {
     const configuredModel = this.options.resolvedModel || this.options.model;
     const model = configuredModel ? this.resolveModel(configuredModel.replace(/^agy\//, '')) : undefined;
     if (model) args.push('--model', model);
+
+    // Antigravity 1.1.5+ accepts effort independently from the model slug.
+    // Its supported range is low|medium|high; map the deeper cross-engine
+    // levels to high instead of passing a value agy rejects.
+    if (this.options.effort && this.options.effort !== 'auto') {
+      const effort = this.options.effort === 'low' || this.options.effort === 'medium' ? this.options.effort : 'high';
+      args.push('--effort', effort);
+    }
     if (this.agyConversationId) args.push('--conversation', this.agyConversationId);
 
     // agy enforces its own print-mode timeout (default 5m). Derive it from the

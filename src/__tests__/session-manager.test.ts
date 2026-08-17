@@ -251,11 +251,33 @@ describe('SessionManager', () => {
   // ─── Session Lifecycle ──────────────────────────────────────────────
 
   describe('session lifecycle', () => {
+    it('publishes lifecycle events for reactive operator clients', async () => {
+      const events: Array<Record<string, unknown>> = [];
+      const unsubscribe = mgr.subscribeSessionEvents((event) => events.push(event));
+      await mgr.startSession({ name: 'events-test', cwd: '/tmp' });
+      await mgr.sendMessage('events-test', 'hello');
+      await mgr.stopSession('events-test');
+      unsubscribe();
+
+      expect(events.map((event) => event.type)).toEqual([
+        'session-started',
+        'turn-started',
+        'turn-finished',
+        'session-stopped',
+      ]);
+      expect(events.every((event) => typeof event.id === 'number' && typeof event.timestamp === 'string')).toBe(true);
+    });
+
     it('startSession creates a session and returns SessionInfo', async () => {
-      const info = await mgr.startSession({ name: 'test1', cwd: '/tmp' });
+      const info = await mgr.startSession({ name: 'test1', cwd: '/tmp', engine: 'codex', model: 'gpt-5.6-sol', effort: 'xhigh' });
 
       expect(info.name).toBe('test1');
       expect(info.cwd).toBe('/tmp');
+      expect(info.engine).toBe('codex');
+      expect(info.model).toBe('gpt-5.6-sol');
+      expect(info.effort).toBe('xhigh');
+      expect(info.activity).toBe('idle');
+      expect(new Date(info.lastActivity).toString()).not.toBe('Invalid Date');
       expect(info.created).toBeDefined();
       expect(info.stats).toBeDefined();
       expect(info.stats.isReady).toBe(true);
@@ -1251,6 +1273,18 @@ describe('SessionManager', () => {
         name: 'autoloop-multi-engine-reviewer',
         engine: 'gemini',
         model: 'reviewer-model',
+      });
+      expect(mgr.autoloopStatus('multi-engine')).toMatchObject({
+        planner_engine: 'codex',
+        coder_engine: 'custom',
+        coder_model: 'coder-model',
+        reviewer_engine: 'gemini',
+        reviewer_model: 'reviewer-model',
+        role_activity: {
+          planner: { status: 'idle' },
+          coder: { status: 'idle' },
+          reviewer: { status: 'idle' },
+        },
       });
     });
 
