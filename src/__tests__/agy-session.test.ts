@@ -218,6 +218,46 @@ describe('PersistentAgySession', () => {
       expect(idx).toBeGreaterThan(-1);
       expect(spawnArgs[idx + 1]).toBe('gemini-3.1-pro');
     });
+
+    it('passes supported reasoning effort independently from the model', async () => {
+      const session = new PersistentAgySession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'bypassPermissions',
+        model: 'gemini-3.7-flash-medium',
+        effort: 'medium',
+      });
+      await session.start();
+
+      const sendPromise = session.send('hello', { waitForComplete: true });
+      setTimeout(() => closeProc(mockProc, 0), 10);
+      await sendPromise;
+
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
+      const idx = spawnArgs.indexOf('--effort');
+      expect(idx).toBeGreaterThan(-1);
+      expect(spawnArgs[idx + 1]).toBe('medium');
+    });
+
+    it('maps unsupported deeper effort levels to agy high', async () => {
+      const session = new PersistentAgySession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'bypassPermissions',
+        model: 'gemini-3.7-flash-high',
+        effort: 'max',
+      });
+      await session.start();
+
+      const sendPromise = session.send('hello', { waitForComplete: true });
+      setTimeout(() => closeProc(mockProc, 0), 10);
+      await sendPromise;
+
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
+      const idx = spawnArgs.indexOf('--effort');
+      expect(idx).toBeGreaterThan(-1);
+      expect(spawnArgs[idx + 1]).toBe('high');
+    });
   });
 
   // ─── conversation continuity ────────────────────────────────────────────

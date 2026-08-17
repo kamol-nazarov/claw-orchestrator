@@ -32,6 +32,8 @@ export interface ModelDef {
   listed?: boolean;
   /** Context window size in tokens */
   contextWindow?: number;
+  /** Maintained by this local fork rather than the upstream registry. */
+  patched?: boolean;
 }
 
 // ─── Model Definitions ───────────────────────────────────────────────────────
@@ -235,6 +237,33 @@ const MODELS: ModelDef[] = [
   // out for subscription accounting. Slugs verified against agy 1.0.16
   // (`agy models`); agy also proxies Claude/GPT-OSS models, passed through
   // unregistered. Unknown slugs silently fall back to agy's default model.
+  {
+    id: 'gemini-3.7-flash-medium',
+    engine: 'agy',
+    provider: 'google',
+    pricing: { input: 0.75, output: 3.75 },
+    aliases: ['agy-flash-3.7', 'agy-3.7-flash'],
+    contextWindow: 1_000_000,
+    patched: true,
+  },
+  {
+    id: 'gemini-3.7-flash-high',
+    engine: 'agy',
+    provider: 'google',
+    pricing: { input: 0.75, output: 3.75 },
+    aliases: ['agy-flash-3.7-high'],
+    contextWindow: 1_000_000,
+    patched: true,
+  },
+  {
+    id: 'gemini-3.7-flash-low',
+    engine: 'agy',
+    provider: 'google',
+    pricing: { input: 0.75, output: 3.75 },
+    aliases: ['agy-flash-3.7-low'],
+    contextWindow: 1_000_000,
+    patched: true,
+  },
   {
     id: 'gemini-3.5-flash',
     engine: 'agy',
@@ -447,6 +476,15 @@ export function getModelList(): { object: string; data: Array<{ id: string; obje
     owned_by: m.provider,
   }));
   return { object: 'list', data };
+}
+
+/** Full non-secret registry records for operator UIs and local tooling. */
+export function getModelDefinitions(): ModelDef[] {
+  return MODELS.map((model) => ({
+    ...model,
+    pricing: { ...model.pricing },
+    aliases: model.aliases ? [...model.aliases] : undefined,
+  }));
 }
 
 /** Get all model aliases as a Record (backward compat). */

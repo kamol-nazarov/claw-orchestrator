@@ -26,15 +26,15 @@
     "assets/banner.jpg"
   ],
   "scripts": {
-    "build": "rm -rf dist && tsc && node scripts/postbuild.mjs",
+    "build": "node scripts/clean-dist.mjs && tsc && node scripts/postbuild.mjs",
     "dev": "tsx src/index.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "lint": "eslint src/ bin/",
     "lint:fix": "eslint src/ bin/ --fix",
-    "format": "prettier --write 'src/**/*.ts' 'bin/**/*.ts'",
-    "format:check": "prettier --check 'src/**/*.ts' 'bin/**/*.ts'",
+    "format": "prettier --write \"src/**/*.ts\" \"bin/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"bin/**/*.ts\"",
     "prepublishOnly": "npm run build"
   },
   "engines": {
@@ -89,11 +89,11 @@
   "author": "enderfga",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Enderfga/claw-orchestrator.git"
+    "url": "git+https://github.com/kamol-nazarov/claw-orchestrator.git"
   },
-  "homepage": "https://github.com/Enderfga/claw-orchestrator#readme",
+  "homepage": "https://github.com/kamol-nazarov/claw-orchestrator#readme",
   "bugs": {
-    "url": "https://github.com/Enderfga/claw-orchestrator/issues"
+    "url": "https://github.com/kamol-nazarov/claw-orchestrator/issues"
   },
   "license": "MIT",
   "dependencies": {

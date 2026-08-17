@@ -16,7 +16,8 @@ import { SessionManager } from './session-manager.js';
 import { sanitizeCwd, validateRegex } from './validation.js';
 import type { EffortLevel, EngineType } from './types.js';
 import { handleChatCompletion } from './openai-compat.js';
-import { getModelList } from './models.js';
+import { getModelDefinitions, getModelList } from './models.js';
+import { getUsageLimits } from './usage-limits.js';
 
 import {
   DEFAULT_SERVER_PORT,
@@ -414,6 +415,23 @@ export class EmbeddedServer {
         return;
       }
 
+      if (path === '/session/events') {
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          Connection: 'keep-alive',
+        });
+        res.write(`event: snapshot\ndata: ${JSON.stringify({ sessions: this.manager.listSessions() })}\n\n`);
+        const unsubscribe = this.manager.subscribeSessionEvents((event) => {
+          if (res.writableEnded || !res.writable) return;
+          const id = typeof event.id === 'number' ? event.id : '';
+          res.write(`id: ${id}\n`);
+          res.write(`event: session\ndata: ${JSON.stringify(event)}\n\n`);
+        });
+        res.on('close', unsubscribe);
+        return;
+      }
+
       if (path === '/session/status') {
         const status = this.manager.getStatus(body.name as string);
         json(200, { ok: true, ...status });
@@ -531,6 +549,64 @@ export class EmbeddedServer {
         return;
       }
 
+      // Authoritative account subscription limits. Each provider is queried
+      // through its authenticated CLI surface; session token estimates are
+      // deliberately not substituted for account quota.
+      if (path === '/usage/limits') {
+        json(200, await getUsageLimits(query.get('refresh') === '1'));
+        return;
+      }
+
+      if (path === '/models/registry') {
+        const [usage, sessions, runs] = await Promise.all([
+          getUsageLimits(query.get('refresh') === '1'),
+          Promise.resolve(this.manager.listSessions()),
+          Promise.resolve(this.manager.autoloopList()),
+        ]);
+        const usageProvider = (provider: string): 'codex' | 'claude' | 'gemini' | null =>
+          provider === 'openai' ? 'codex' : provider === 'anthropic' ? 'claude' : provider === 'google' ? 'gemini' : null;
+        const definitions = getModelDefinitions().filter((model) => model.listed !== false);
+        const models = definitions.map((model) => {
+          const active = sessions.filter((session) => session.model === model.id);
+          const roles: Array<{ runId: string; role: 'planner' | 'coder' | 'reviewer' }> = [];
+          for (const run of runs) {
+            if (run.planner_model === model.id) roles.push({ runId: run.run_id, role: 'planner' });
+            if (run.coder_model === model.id) roles.push({ runId: run.run_id, role: 'coder' });
+            if (run.reviewer_model === model.id) roles.push({ runId: run.run_id, role: 'reviewer' });
+          }
+          const providerUsage = usage.providers.find((entry) => entry.provider === usageProvider(model.provider));
+          const reportedWindows = providerUsage?.status === 'ok' ? providerUsage.windows : [];
+          return {
+            id: model.id,
+            label: null,
+            provider: model.provider,
+            binary: model.engine,
+            engine: model.engine,
+            contextWindow: model.contextWindow ?? null,
+            aliases: model.aliases ?? [],
+            patched: model.patched === true,
+            roles,
+            activeSessions: active.map((session) => session.name),
+            lastUsed:
+              active.length > 0
+                ? active.map((session) => session.lastActivity).sort((a, b) => b.localeCompare(a))[0]
+                : null,
+            notes: null,
+            quota: providerUsage ?? null,
+            quotaGated: reportedWindows.length > 0 && reportedWindows.every((window) => window.remainingPercent <= 0),
+          };
+        });
+        json(200, {
+          ok: true,
+          source: 'compiled model registry',
+          path: null,
+          syncedAt: new Date().toISOString(),
+          count: models.length,
+          models,
+        });
+        return;
+      }
+
       // ─── OpenAI-Compatible Routes ─────────────────────────────
 
       if (path === '/v1/chat/completions') {
@@ -598,16 +674,52 @@ export class EmbeddedServer {
 
       // ─── Dashboard (single static HTML) ─────────────────────────
       //
-      // Serves src/dashboard/index.html (or dist/src/dashboard/index.html in
+      // Serves src/dashboard/operator.html (or dist/src/dashboard/operator.html in
       // a built install). Walks up like resolveConfigPath does so it works
       // both during dev (tsx) and from the published package.
+
+      const dashboardAssetMatch = path.match(/^\/dashboard\/assets\/([A-Za-z0-9._-]+)$/);
+      if (dashboardAssetMatch) {
+        const allowed = new Set(['organic.css', 'operator-v2.css', 'operator-v2.js']);
+        const asset = dashboardAssetMatch[1];
+        if (!allowed.has(asset)) {
+          json(404, { ok: false, error: 'dashboard asset not found' });
+          return;
+        }
+        const fsMod = await import('node:fs');
+        const pathMod = await import('node:path');
+        const urlMod = await import('node:url');
+        let dir = pathMod.dirname(urlMod.fileURLToPath(import.meta.url));
+        let file: string | null = null;
+        for (let i = 0; i < 8; i++) {
+          const candidate = pathMod.join(dir, 'src', 'dashboard', asset);
+          if (fsMod.existsSync(candidate)) {
+            file = candidate;
+            break;
+          }
+          const parent = pathMod.dirname(dir);
+          if (parent === dir) break;
+          dir = parent;
+        }
+        if (!file) {
+          json(404, { ok: false, error: 'dashboard asset not found' });
+          return;
+        }
+        const contentType = asset.endsWith('.css') ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8';
+        res.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': 'no-cache' });
+        res.end(fsMod.readFileSync(file));
+        return;
+      }
 
       if (
         path === '/dashboard' ||
         path === '/dashboard/' ||
         path === '/dashboard/index.html' ||
         path === '/dash' ||
-        path === '/dash/'
+        path === '/dash/' ||
+        path === '/dashboard/legacy' ||
+        path === '/dashboard/prototype' ||
+        path === '/dashboard/v2'
       ) {
         const fsMod = await import('node:fs');
         const pathMod = await import('node:path');
@@ -616,7 +728,13 @@ export class EmbeddedServer {
         let dir = here;
         let file = null;
         for (let i = 0; i < 8; i++) {
-          const candidate = pathMod.join(dir, 'src', 'dashboard', 'index.html');
+          const asset =
+            path === '/dashboard/legacy'
+              ? 'index.html'
+              : path === '/dashboard/prototype'
+                ? 'operator.html'
+                : 'operator-v2.html';
+          const candidate = pathMod.join(dir, 'src', 'dashboard', asset);
           if (fsMod.existsSync(candidate)) {
             file = candidate;
             break;
@@ -670,22 +788,51 @@ export class EmbeddedServer {
           json(400, { ok: false, error: 'projectDir failed sanitization' });
           return;
         }
-        const session = this.manager.councilStart(task, {
-          projectDir: safeProjectDir,
-          agents: [
+        const requestedAgents = (body as { agents?: Array<{ model?: string; role?: string }> }).agents;
+        const definitions = new Map(getModelDefinitions().map((model) => [model.id, model]));
+        let agents;
+        if (requestedAgents !== undefined) {
+          if (!Array.isArray(requestedAgents) || requestedAgents.length < 2 || requestedAgents.length > 8) {
+            json(400, { ok: false, error: 'agents must contain between 2 and 8 registry models' });
+            return;
+          }
+          agents = requestedAgents.map((requested, index) => {
+            const model = typeof requested.model === 'string' ? definitions.get(requested.model) : undefined;
+            if (!model || model.engine === 'custom') {
+              throw new Error(`Council model '${String(requested.model)}' is not a supported built-in registry model`);
+            }
+            const requestedRole = typeof requested.role === 'string' ? requested.role.trim().toLowerCase() : '';
+            const role = ['chair', 'member', 'auditor'].includes(requestedRole)
+              ? requestedRole
+              : index === 0
+                ? 'chair'
+                : index === requestedAgents.length - 1
+                  ? 'auditor'
+                  : 'member';
+            return {
+              name: `member-${index + 1}`,
+              emoji: '●',
+              role,
+              persona: `You are the ${role} in a multi-model council. Answer independently, cite concrete evidence, and state whether you agree with the emerging consensus.`,
+              engine: model.engine,
+              model: model.id,
+            };
+          });
+        } else {
+          agents = [
             {
               name: 'agent-A',
               emoji: '🔵',
               persona:
                 'You are agent A, a careful planner. Lay out the approach and architecture before changing code.',
-              engine: 'claude',
+              engine: 'claude' as const,
               model: 'claude-opus-4-7',
             },
             {
               name: 'agent-B',
               emoji: '🟠',
               persona: 'You are agent B, a pragmatic implementer. Make the change small, focused, and review-ready.',
-              engine: 'claude',
+              engine: 'claude' as const,
               model: 'claude-opus-4-7',
             },
             {
@@ -693,11 +840,20 @@ export class EmbeddedServer {
               emoji: '🟢',
               persona:
                 'You are agent C, a critical reviewer. Block consensus until the quality bar is met — be specific about what is missing.',
-              engine: 'claude',
+              engine: 'claude' as const,
               model: 'claude-opus-4-7',
             },
-          ],
-          maxRounds: (body as { maxRounds?: number }).maxRounds ?? 15,
+          ];
+        }
+        const maxRounds = (body as { maxRounds?: number }).maxRounds ?? 15;
+        if (!Number.isInteger(maxRounds) || maxRounds < 1 || maxRounds > 50) {
+          json(400, { ok: false, error: 'maxRounds must be an integer from 1 to 50' });
+          return;
+        }
+        const session = this.manager.councilStart(task, {
+          projectDir: safeProjectDir,
+          agents,
+          maxRounds,
           defaultPermissionMode: 'bypassPermissions',
         });
         json(200, { ok: true, id: session.id, status: session.status });
@@ -747,6 +903,36 @@ export class EmbeddedServer {
         };
         council.on('council-event', onEvent);
         res.on('close', cleanup);
+        return;
+      }
+
+      const councilActionMatch = path.match(/^\/council\/([^/]+)\/(inject|review|accept|reject|abort)$/);
+      if (councilActionMatch) {
+        const id = councilActionMatch[1];
+        const action = councilActionMatch[2];
+        if (action === 'inject') {
+          const message = (body as { message?: string }).message;
+          if (typeof message !== 'string' || !message.trim()) {
+            json(400, { ok: false, error: 'message required' });
+            return;
+          }
+          this.manager.councilInject(id, message);
+          json(200, { ok: true });
+        } else if (action === 'review') {
+          json(200, { ok: true, review: await this.manager.councilReview(id) });
+        } else if (action === 'accept') {
+          json(200, { ok: true, result: await this.manager.councilAccept(id) });
+        } else if (action === 'reject') {
+          const feedback = (body as { feedback?: string }).feedback;
+          if (typeof feedback !== 'string' || !feedback.trim()) {
+            json(400, { ok: false, error: 'feedback required' });
+            return;
+          }
+          json(200, { ok: true, result: await this.manager.councilReject(id, feedback) });
+        } else {
+          this.manager.councilAbort(id);
+          json(200, { ok: true });
+        }
         return;
       }
 
@@ -828,6 +1014,32 @@ export class EmbeddedServer {
         } else {
           json(200, { ok: true, state });
         }
+        return;
+      }
+
+      const v2IterationsMatch = path.match(/^\/autoloop\/([^/]+)\/iterations$/);
+      if (v2IterationsMatch) {
+        try {
+          json(200, { ok: true, ...this.manager.autoloopHistory(v2IterationsMatch[1]) });
+        } catch (err) {
+          json(404, { ok: false, error: (err as Error).message });
+        }
+        return;
+      }
+
+      const v2PauseMatch = path.match(/^\/autoloop\/([^/]+)\/pause$/);
+      if (v2PauseMatch) {
+        const state = await this.manager.autoloopPause(v2PauseMatch[1], 'dashboard-operator');
+        if (!state) json(404, { ok: false, error: 'run not found or not live' });
+        else json(200, { ok: true, state });
+        return;
+      }
+
+      const v2StopMatch = path.match(/^\/autoloop\/([^/]+)\/stop$/);
+      if (v2StopMatch) {
+        const stopped = await this.manager.autoloopStop(v2StopMatch[1], 'dashboard-operator-stop');
+        if (!stopped) json(404, { ok: false, error: 'run not found or not live' });
+        else json(200, { ok: true });
         return;
       }
 
@@ -950,6 +1162,8 @@ export class EmbeddedServer {
           send('planner_error', { message: err instanceof Error ? err.message : String(err) });
         const onCoderReply = (text: unknown): void => send('coder_reply', { text });
         const onReviewerReply = (text: unknown): void => send('reviewer_reply', { text });
+        const onRoleStream = (data: unknown): void => send('role_stream', data);
+        const onRoleEvent = (data: unknown): void => send('role_event', data);
         const onCompact = (e: unknown): void => send('compact', e);
         const cleanup = (): void => {
           sseClosed = true;
@@ -962,6 +1176,8 @@ export class EmbeddedServer {
           ctx.dispatcher.off('planner_error', onPlannerError);
           ctx.dispatcher.off('coder_reply', onCoderReply);
           ctx.dispatcher.off('reviewer_reply', onReviewerReply);
+          ctx.dispatcher.off('role_stream', onRoleStream);
+          ctx.dispatcher.off('role_event', onRoleEvent);
           ctx.dispatcher.off('compact', onCompact);
           try {
             res.end();
@@ -978,6 +1194,8 @@ export class EmbeddedServer {
         ctx.dispatcher.on('planner_error', onPlannerError);
         ctx.dispatcher.on('coder_reply', onCoderReply);
         ctx.dispatcher.on('reviewer_reply', onReviewerReply);
+        ctx.dispatcher.on('role_stream', onRoleStream);
+        ctx.dispatcher.on('role_event', onRoleEvent);
         ctx.dispatcher.on('compact', onCompact);
         res.on('close', cleanup);
         return;

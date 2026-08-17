@@ -16,6 +16,27 @@ export default tseslint.config(
     },
   },
   {
+    files: ['src/dashboard/*.js'],
+    languageOptions: {
+      globals: {
+        clearTimeout: 'readonly',
+        document: 'readonly',
+        EventSource: 'readonly',
+        fetch: 'readonly',
+        FormData: 'readonly',
+        navigator: 'readonly',
+        requestAnimationFrame: 'readonly',
+        sessionStorage: 'readonly',
+        setInterval: 'readonly',
+        setTimeout: 'readonly',
+      },
+    },
+    rules: {
+      '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_', caughtErrorsIgnorePattern: '^_' }],
+      'no-empty': ['error', { allowEmptyCatch: true }],
+    },
+  },
+  {
     ignores: ['dist/', 'node_modules/', '*.config.*', 'scripts/'],
   },
 );

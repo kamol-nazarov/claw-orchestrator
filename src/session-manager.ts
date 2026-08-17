@@ -9,6 +9,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { execFile, execFileSync } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
@@ -161,9 +162,10 @@ import { Fanout, type FanoutConfig, type FanoutSession, type FanoutAgentSpec } f
 import { AutoloopRunner } from './autoloop/runner.js';
 import { ClaudeAgentDispatcher, type ClaudeAgentDispatcherConfig } from './autoloop/dispatcher.js';
 import type { AutoloopState, PushPolicy } from './autoloop/types.js';
-import { DEFAULT_PUSH_POLICY } from './autoloop/types.js';
+import { DEFAULT_PUSH_POLICY, MAX_METRIC_HISTORY } from './autoloop/types.js';
 import { Msg as AutoloopMsg, type PushChannel, type PushLevel } from './autoloop/messages.js';
 import { appendPushLog, notifyUserFallbackChain } from './autoloop/notify.js';
+import { readAutoloopHistory, type AutoloopHistoryView } from './autoloop/ledger-view.js';
 import { UltraappManager } from './ultraapp/manager.js';
 import { UltraappStore, defaultStoreRoot } from './ultraapp/store.js';
 import type { UltraappRouter } from './ultraapp/router.js';
@@ -191,6 +193,8 @@ interface ManagedSession {
   cwd: string;
   claudeSessionId?: string;
   skipPersistence?: boolean;
+  /** True only while this session is actively awaiting an engine response. */
+  busy: boolean;
   /**
    * Per-session send chain. Concurrent sendMessage() calls on the same session
    * MUST serialize, otherwise PersistentClaudeSession's single _streamCallbacks
@@ -421,6 +425,58 @@ export function removeAutoloopFromRegistry(file: string, runId: string): number 
   return removed;
 }
 
+export interface RecoveredAutoloopLedgerState {
+  iter: number;
+  hadSubagents: boolean;
+  metricHistory: number[];
+  lastActivityAt: number;
+}
+
+/** Recover the resumable runner position from immutable iteration artifacts. */
+export function recoverAutoloopLedgerState(ledgerDir: string): RecoveredAutoloopLedgerState {
+  const iterRoot = path.join(ledgerDir, 'iter');
+  if (!fs.existsSync(iterRoot)) {
+    return { iter: 0, hadSubagents: false, metricHistory: [], lastActivityAt: 0 };
+  }
+  const iterations = fs
+    .readdirSync(iterRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && /^\d+$/.test(entry.name))
+    .map((entry) => Number(entry.name))
+    .sort((a, b) => a - b);
+  if (!iterations.length) {
+    return { iter: 0, hadSubagents: false, metricHistory: [], lastActivityAt: 0 };
+  }
+  let lastCompleted = -1;
+  let lastActivityAt = 0;
+  const metricHistory: number[] = [];
+  for (const iter of iterations) {
+    const dir = path.join(iterRoot, String(iter));
+    try {
+      lastActivityAt = Math.max(lastActivityAt, fs.statSync(dir).mtimeMs);
+    } catch {
+      // A concurrently removed directory is ignored; the registry still keeps the run visible.
+    }
+    const verdictFile = path.join(dir, 'verdict.json');
+    if (!fs.existsSync(verdictFile)) continue;
+    try {
+      const verdict = JSON.parse(fs.readFileSync(verdictFile, 'utf-8')) as { iter?: number; metric?: number };
+      lastCompleted = Math.max(lastCompleted, Number.isInteger(verdict.iter) ? Number(verdict.iter) : iter);
+      if (typeof verdict.metric === 'number' && Number.isFinite(verdict.metric)) metricHistory.push(verdict.metric);
+      lastActivityAt = Math.max(lastActivityAt, fs.statSync(verdictFile).mtimeMs);
+    } catch {
+      // A malformed verdict is not considered completed. Resume at that iteration.
+    }
+  }
+  const latestDirectory = iterations[iterations.length - 1] ?? 0;
+  const iter = Math.max(latestDirectory, lastCompleted + 1);
+  return {
+    iter,
+    hadSubagents: true,
+    metricHistory: metricHistory.slice(-MAX_METRIC_HISTORY),
+    lastActivityAt,
+  };
+}
+
 /**
  * Enumerate council sessions from on-disk transcripts. Called by
  * SessionManager.councilList() to surface runs that the current process didn't
@@ -461,6 +517,8 @@ export function listCouncilsFromDisk(logDir = DEFAULT_COUNCIL_LOG_DIR): CouncilD
 
 export class SessionManager {
   private sessions = new Map<string, ManagedSession>();
+  private readonly sessionEvents = new EventEmitter();
+  private sessionEventSequence = 0;
   private _pendingSessions = new Map<string, Promise<SessionInfo>>();
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
   private pluginConfig: PluginConfig;
@@ -476,10 +534,23 @@ export class SessionManager {
   private _ultraappRouter: UltraappRouter | null = null;
   private _ultraappRuntimeMode: 'host' | 'docker' = 'host';
 
+  subscribeSessionEvents(listener: (event: Record<string, unknown>) => void): () => void {
+    this.sessionEvents.on('event', listener);
+    return () => this.sessionEvents.off('event', listener);
+  }
+
+  private _emitSessionEvent(event: Record<string, unknown>): void {
+    this.sessionEvents.emit('event', {
+      id: ++this.sessionEventSequence,
+      timestamp: new Date().toISOString(),
+      ...event,
+    });
+  }
+
   constructor(config?: Partial<PluginConfig>, logger?: Logger) {
     this.logger = logger || createConsoleLogger('SessionManager');
     this.pluginConfig = {
-      claudeBin: config?.claudeBin || 'claude',
+      claudeBin: config?.claudeBin || process.env.CLAUDE_BIN || 'claude',
       defaultModel: config?.defaultModel,
       defaultPermissionMode: config?.defaultPermissionMode || 'acceptEdits',
       defaultEffort: config?.defaultEffort || 'auto',
@@ -666,9 +737,11 @@ export class SessionManager {
       cwd: fullConfig.cwd,
       claudeSessionId: this._sessionResumeId(engine, session),
       skipPersistence: skipPersist,
+      busy: false,
     };
 
     this.sessions.set(name, managed);
+    this._emitSessionEvent({ type: 'session-started', name, session: this._toSessionInfo(name, managed) });
 
     // Persist registry after session is live (skip for ephemeral sessions
     // like the openai-compat bridge that set skipPersistence: true)
@@ -712,6 +785,8 @@ export class SessionManager {
 
     try {
       managed.lastActivity = Date.now();
+      managed.busy = true;
+      this._emitSessionEvent({ type: 'turn-started', name });
 
       const sendOpts: Record<string, unknown> = {
         waitForComplete: true,
@@ -721,7 +796,7 @@ export class SessionManager {
       if (options.effort) sendOpts.effort = options.effort;
       if (options.plan) sendOpts.plan = true;
 
-      if (options.onEvent || options.onChunk) {
+      {
         // A throwing user callback must not corrupt the turn or leave the
         // sendChain unreleased — isolate each invocation.
         const safe = (fn: () => void): void => {
@@ -733,13 +808,16 @@ export class SessionManager {
         };
         sendOpts.callbacks = {
           onText: (text: string) => {
+            this._emitSessionEvent({ type: 'session-stream', name, kind: 'text', content: text });
             safe(() => options.onChunk?.(text));
             safe(() => options.onEvent?.({ type: 'text', result: text } as StreamEvent));
           },
           onToolUse: (event: unknown) => {
+            this._emitSessionEvent({ type: 'session-stream', name, kind: 'tool-use', content: event });
             safe(() => options.onEvent?.({ type: 'tool_use', ...(event as object) } as StreamEvent));
           },
           onToolResult: (event: unknown) => {
+            this._emitSessionEvent({ type: 'session-stream', name, kind: 'tool-result', content: event });
             safe(() => options.onEvent?.({ type: 'tool_result', ...(event as object) } as StreamEvent));
           },
         };
@@ -767,6 +845,9 @@ export class SessionManager {
 
       return { output: '', sessionId: this._managedResumeId(managed), events: [] };
     } finally {
+      managed.busy = false;
+      managed.lastActivity = Date.now();
+      this._emitSessionEvent({ type: 'turn-finished', name, session: this._toSessionInfo(name, managed) });
       releaseChain();
       // If this was the tail of the chain, clear it so memory doesn't grow.
       if (managed.sendChain === link) managed.sendChain = undefined;
@@ -775,6 +856,7 @@ export class SessionManager {
 
   async stopSession(name: string, opts: { keepPersisted?: boolean } = {}): Promise<void> {
     const managed = this._getSession(name);
+    const info = this._toSessionInfo(name, managed);
     managed.session.stop();
     this.sessions.delete(name);
     // Remove PID tracking
@@ -788,6 +870,7 @@ export class SessionManager {
       this.persistedSessions.delete(name);
       savePersistedSessions(this.persistedSessions, this.logger);
     }
+    this._emitSessionEvent({ type: 'session-stopped', name, session: info });
   }
 
   listSessions(): SessionInfo[] {
@@ -1964,7 +2047,11 @@ export class SessionManager {
       claudeSessionId: resumeSessionId,
       created: managed.created,
       cwd: managed.cwd,
+      engine: managed.config.engine,
       model: managed.config.resolvedModel || managed.config.model,
+      effort: managed.config.effort,
+      activity: managed.busy ? 'working' : 'idle',
+      lastActivity: new Date(managed.lastActivity).toISOString(),
       paused: false,
       stats,
     };
@@ -2798,13 +2885,13 @@ export class SessionManager {
 
   autoloopStatus(runId: string): AutoloopState | undefined {
     const live = this.autoloops.get(runId)?.runner.state;
-    if (live) return live;
+    const entry = listAutoloopsFromRegistry().find((e) => e.run_id === runId);
+    if (live) return this._decorateAutoloopState(live, entry);
     // Fallback: rebuild a terminated-state shape from the cross-process
     // registry so the dashboard can open historical runs (read chat
     // history, view plan.md, push_log) instead of hanging on a 404 forever.
-    const entry = listAutoloopsFromRegistry().find((e) => e.run_id === runId);
     if (!entry) return undefined;
-    return {
+    return this._decorateAutoloopState({
       run_id: entry.run_id,
       status: 'terminated',
       iter: 0,
@@ -2818,16 +2905,20 @@ export class SessionManager {
       recent_phase_errors: [],
       metric_history: [],
       last_activity_at: 0,
-    };
+    }, entry);
   }
 
   autoloopList(): AutoloopState[] {
-    const inMemory = Array.from(this.autoloops.values()).map((c) => c.runner.state);
+    const registry = listAutoloopsFromRegistry();
+    const registryById = new Map(registry.map((entry) => [entry.run_id, entry]));
+    const inMemory = Array.from(this.autoloops.values()).map((c) =>
+      this._decorateAutoloopState(c.runner.state, registryById.get(c.runner.state.run_id)),
+    );
     const inMemIds = new Set(inMemory.map((s) => s.run_id));
-    const fromDisk: AutoloopState[] = listAutoloopsFromRegistry()
+    const fromDisk: AutoloopState[] = registry
       .filter((e) => !inMemIds.has(e.run_id))
       .map(
-        (e): AutoloopState => ({
+        (e): AutoloopState => this._decorateAutoloopState({
           run_id: e.run_id,
           status: 'terminated',
           iter: 0,
@@ -2841,9 +2932,84 @@ export class SessionManager {
           recent_phase_errors: [],
           metric_history: [],
           last_activity_at: 0,
-        }),
+        }, e),
       );
     return [...inMemory, ...fromDisk].sort((a, b) => (b.started_at || '').localeCompare(a.started_at || ''));
+  }
+
+  autoloopHistory(runId: string): AutoloopHistoryView {
+    const state = this.autoloopStatus(runId);
+    if (!state) throw new Error(`Autoloop run '${runId}' not found`);
+    return readAutoloopHistory(state.ledger_dir, {
+      planner: state.planner_model,
+      coder: state.coder_model,
+      reviewer: state.reviewer_model,
+    });
+  }
+
+  /** Add non-secret role selection and live liveness metadata for operator UIs. */
+  private _decorateAutoloopState(state: AutoloopState, entry?: AutoloopRegistryEntry): AutoloopState {
+    const role = (name: AutoloopRoleName) => {
+      const managed = this.sessions.get(`autoloop-${state.run_id}-${name}`);
+      const terminal = state.status === 'terminated' || state.status === 'crashed';
+      const status = terminal
+        ? state.status === 'crashed'
+          ? ('error' as const)
+          : ('done' as const)
+        : state.status === 'paused'
+          ? ('paused' as const)
+          : managed?.busy || managed?.session.isBusy
+            ? ('working' as const)
+            : managed
+              ? ('idle' as const)
+              : ('waiting' as const);
+      const stats = managed?.session.getStats();
+      return {
+        status,
+        last_activity_at: managed?.lastActivity ?? (name === 'planner' ? state.last_activity_at : 0),
+        detail:
+          status === 'working'
+            ? 'Engine turn in progress'
+            : status === 'waiting'
+              ? state.subagents_spawned
+                ? 'Waiting to be dispatched'
+                : 'Waiting for subagents to be spawned'
+              : status === 'paused'
+                ? state.status_reason ?? 'Run paused'
+                : status === 'done'
+                  ? state.status_reason ?? 'Run finished'
+                  : status === 'error'
+                    ? state.status_reason ?? 'Run failed'
+                    : 'Ready for the next turn',
+        usage: stats
+          ? {
+              turns: stats.turns,
+              tokensIn: stats.tokensIn,
+              tokensOut: stats.tokensOut,
+              cachedTokens: stats.cachedTokens,
+              costUsd: stats.costUsd,
+              contextPercent: stats.contextPercent,
+            }
+          : undefined,
+      };
+    };
+    const planner = this.sessions.get(`autoloop-${state.run_id}-planner`);
+    const coder = this.sessions.get(`autoloop-${state.run_id}-coder`);
+    const reviewer = this.sessions.get(`autoloop-${state.run_id}-reviewer`);
+    return {
+      ...state,
+      planner_engine: planner?.config.engine ?? entry?.planner_engine,
+      planner_model: planner?.config.resolvedModel ?? planner?.config.model ?? entry?.planner_model,
+      coder_engine: coder?.config.engine ?? entry?.coder_engine,
+      coder_model: coder?.config.resolvedModel ?? coder?.config.model ?? entry?.coder_model,
+      reviewer_engine: reviewer?.config.engine ?? entry?.reviewer_engine,
+      reviewer_model: reviewer?.config.resolvedModel ?? reviewer?.config.model ?? entry?.reviewer_model,
+      role_activity: {
+        planner: role('planner'),
+        coder: role('coder'),
+        reviewer: role('reviewer'),
+      },
+    };
   }
 
   /**
@@ -2872,6 +3038,15 @@ export class SessionManager {
     return true;
   }
 
+  async autoloopPause(runId: string, reason = 'operator-pause'): Promise<AutoloopState | undefined> {
+    const ctx = this.autoloops.get(runId);
+    if (!ctx) return undefined;
+    if (ctx.runner.state.status !== 'paused') {
+      await ctx.runner.send(AutoloopMsg.pause(ctx.runner.state.iter, { reason }));
+    }
+    return ctx.runner.state;
+  }
+
   /**
    * Re-attach a terminated run that lives in the registry but not in this
    * process's in-memory map. Re-creates dispatcher + runner with the same
@@ -2898,7 +3073,12 @@ export class SessionManager {
     } = {},
   ): Promise<AutoloopState> {
     const existing = this.autoloops.get(runId);
-    if (existing) return existing.runner.state;
+    if (existing) {
+      if (existing.runner.state.status === 'paused') {
+        await existing.runner.send(AutoloopMsg.resume(existing.runner.state.iter));
+      }
+      return existing.runner.state;
+    }
 
     const entry = listAutoloopsFromRegistry().find((e) => e.run_id === runId);
     if (!entry) throw new Error(`Autoloop run '${runId}' not found in registry`);
@@ -2909,11 +3089,12 @@ export class SessionManager {
     const coderEngine = validateAutoloopRole('coder', entry.coder_engine, opts.coderCustomEngine);
     const reviewerEngine = validateAutoloopRole('reviewer', entry.reviewer_engine, opts.reviewerCustomEngine);
 
+    const recovered = recoverAutoloopLedgerState(entry.ledger_dir);
+
     // The registry is append-only and newest entry wins. Leave the prior row
     // untouched while starting so a transient failure cannot erase or restore
     // stale cross-process state. A successful start appends the replacement.
-    return (
-      await this.autoloopStart({
+    const resumed = await this.autoloopStart({
         runId: entry.run_id,
         workspace: entry.workspace,
         plannerEngine,
@@ -2925,8 +3106,22 @@ export class SessionManager {
         reviewerEngine,
         reviewerModel: entry.reviewer_model,
         reviewerCustomEngine: opts.reviewerCustomEngine,
-      })
-    ).state;
+      });
+    resumed.state.iter = recovered.iter;
+    resumed.state.metric_history = recovered.metricHistory;
+    if (recovered.lastActivityAt > 0) resumed.state.last_activity_at = recovered.lastActivityAt;
+
+    // A prior iteration directory proves the run had already crossed plan
+    // approval and spawned its worker roles. Restore those sessions using the
+    // registry's exact engine/model selections instead of forcing the Planner
+    // to repeat approval or creating a fresh Autoloop.
+    if (recovered.hadSubagents) {
+      const ctx = this.autoloops.get(runId);
+      if (!ctx) throw new Error(`Autoloop run '${runId}' disappeared during resume`);
+      await ctx.dispatcher.spawnSubagents();
+      ctx.runner.markSubagentsSpawned();
+    }
+    return resumed.state;
   }
 
   /**

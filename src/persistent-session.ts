@@ -62,6 +62,7 @@ interface InternalStats {
 export class PersistentClaudeSession extends EventEmitter implements ISession {
   private options: SessionConfig & { hooks?: HookConfig; modelOverrides?: Record<string, string> };
   private claudeBin: string;
+  private claudeBinArgs: string[];
   private proc: ChildProcess | null = null;
   private _rl: readline.Interface | null = null;
   private _isReady = false;
@@ -78,6 +79,17 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
   constructor(config: SessionConfig, claudeBin?: string) {
     super();
     this.claudeBin = claudeBin || process.env.CLAUDE_BIN || 'claude';
+    this.claudeBinArgs = [];
+    if (process.env.CLAUDE_BIN_ARGS) {
+      try {
+        const parsed = JSON.parse(process.env.CLAUDE_BIN_ARGS) as unknown;
+        if (Array.isArray(parsed) && parsed.every((arg) => typeof arg === 'string')) {
+          this.claudeBinArgs = parsed;
+        }
+      } catch {
+        throw new Error('CLAUDE_BIN_ARGS must be a JSON array of strings');
+      }
+    }
     this.options = {
       ...config,
       permissionMode: config.permissionMode || 'acceptEdits',
@@ -155,6 +167,7 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
   async start(): Promise<this> {
     const resolvedBin = this.claudeBin;
     const args = [
+      ...this.claudeBinArgs,
       '-p',
       '--input-format',
       'stream-json',
